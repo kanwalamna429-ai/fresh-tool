@@ -2,13 +2,19 @@
 // POST /api/generate
 //
 // Generates AI content for a URL across all campaign platforms, then saves
-// generated_content + scheduled_posts rows using the campaign's own schedule.
+// generated_content + upserts scheduled_posts rows.
 //
 // Body: { urlId, campaignId, editedContent? }
 //
 // Scheduling model (mirrors scheduler.ts):
 //   URL at slot index i → scheduled_at = baseTime + i × frequencyInterval
 //   Where baseTime = max(campaign.start_date, NOW)
+//
+// UPSERT behaviour:
+//   If a pending/failed scheduled_post already exists for (campaign_id, url_id, platform)
+//   — e.g. created by activateCampaign — we UPDATE it with the real AI content
+//   rather than inserting a duplicate row. This prevents "Scheduled post not found"
+//   caused by the UI holding an ID that was never properly created.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -81,7 +87,6 @@ function computeScheduledAt(
   const intervalMs = frequencyToMs(frequency)
   const now        = new Date()
 
-  // Base = campaign start date (if in the future) OR now
   let base: Date
   if (campaignStartDate) {
     const start = new Date(campaignStartDate + 'T00:00:00')
@@ -220,7 +225,30 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // -------------------------------------------------------------------------
-  // 6. Generate per-platform posts
+  // 6. Pre-load existing scheduled_posts for this url+campaign
+  //    (created by activateCampaign with content_pending: true)
+  //    We will UPDATE these rather than INSERT duplicates.
+  // -------------------------------------------------------------------------
+  const { data: existingPosts } = await supabase
+    .from('scheduled_posts')
+    .select('id, platform, status')
+    .eq('campaign_id', campaignId)
+    .eq('url_id', urlId)
+    .eq('user_id', user.id)
+    .in('status', ['pending', 'failed'])
+    .is('deleted_at', null)
+    .order('created_at', { ascending: true })
+
+  // Build a map: platform → first existing scheduled_post id
+  const existingPostMap: Record<string, string> = {}
+  for (const p of existingPosts ?? []) {
+    if (!existingPostMap[p.platform]) {
+      existingPostMap[p.platform] = p.id
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // 7. Generate per-platform posts
   // -------------------------------------------------------------------------
   const results: Array<{
     platform:           string
@@ -239,7 +267,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     const limits       = PLATFORM_LIMITS[platform as SocialPlatform]
     const charLimit    = limits?.charLimit ?? 500
 
-    // Merge DEFAULT → platform code defaults → user-saved settings
     const pSettings: PlatformDefaultSettings = {
       ...DEFAULT_PLATFORM_SETTING,
       ...(platformDefaults[platform] ?? {}),
@@ -251,7 +278,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     let hashtags: string[] = []
 
     if (editedContent[platform]) {
-      // User manually edited — use as-is, skip AI
       content = editedContent[platform]
     } else if (process.env.GEMINI_API_KEY) {
       try {
@@ -276,7 +302,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     if (!content) content = enrichedCtx.title ?? sourceUrl ?? `[Content for ${platform}]`
 
-    // Append custom hashtags from user settings
     if (pSettings.hashtags) {
       const custom = pSettings.hashtags
         .split(/[\s,]+/).map((t) => t.trim()).filter(Boolean)
@@ -285,79 +310,118 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     }
 
     // -------------------------------------------------------------------
-    // Save generated_content
+    // Save generated_content (best-effort — not all schemas have this table)
     // -------------------------------------------------------------------
-    const { data: genRow, error: genErr } = await supabase
-      .from('generated_content')
-      .insert({
-        user_id:              user.id,
-        campaign_id:          campaignId,
-        extracted_content_id: extracted?.id ?? null,
-        platform,
-        content,
-        content_type: 'post',
-        hashtags,
-        is_approved:  pSettings.autoApprove,
-        metadata: {
-          url_id:                urlId,
-          source_url:            sourceUrl,
-          og_image:              ogImage,
-          rewritten_title:       rewrittenTitle,
-          rewritten_description: rewrittenDescription,
-          char_limit:            charLimit,
-          tone:                  pSettings.tone,
-          style:                 pSettings.style,
-          scheduled_at:          scheduledAt,
-        },
-      })
-      .select('id')
-      .single()
-
-    if (genErr || !genRow) {
-      results.push({ platform, content, hashtags, charLimit, scheduledAt,
-        generatedContentId: '', scheduledPostId: '', connectionId, error: genErr?.message })
-      continue
-    }
-
-    // -------------------------------------------------------------------
-    // Save scheduled_post
-    // -------------------------------------------------------------------
-    const { data: postRow, error: postErr } = await supabase
-      .from('scheduled_posts')
-      .insert({
-        user_id:              user.id,
-        campaign_id:          campaignId,
-        url_id:               urlId,
-        connection_id:        connectionId,
-        generated_content_id: genRow.id,
-        platform,
-        content,
-        scheduled_at:         scheduledAt,
-        status:               'pending',
-        metadata: {
+    let generatedContentId = ''
+    try {
+      const { data: genRow } = await supabase
+        .from('generated_content')
+        .insert({
+          user_id:              user.id,
+          campaign_id:          campaignId,
+          extracted_content_id: extracted?.id ?? null,
+          platform,
+          content,
+          content_type: 'post',
           hashtags,
-          source_url:            sourceUrl,
-          og_image:              ogImage,
-          title:                 rewrittenTitle,
-          description:           rewrittenDescription,
-          generated_at:          new Date().toISOString(),
-        },
-      })
-      .select('id')
-      .single()
-
-    if (postErr || !postRow) {
-      results.push({ platform, content, hashtags, charLimit, scheduledAt,
-        generatedContentId: genRow.id, scheduledPostId: '', connectionId, error: postErr?.message })
-      continue
+          is_approved:  pSettings.autoApprove,
+          approved_at:  pSettings.autoApprove ? new Date().toISOString() : null,
+          metadata: {
+            url_id:                urlId,
+            source_url:            sourceUrl,
+            og_image:              ogImage,
+            rewritten_title:       rewrittenTitle,
+            rewritten_description: rewrittenDescription,
+            char_limit:            charLimit,
+            tone:                  pSettings.tone,
+            style:                 pSettings.style,
+            scheduled_at:          scheduledAt,
+          },
+        })
+        .select('id')
+        .single()
+      if (genRow?.id) generatedContentId = genRow.id
+    } catch {
+      // generated_content table may not exist in all deployments; continue anyway
     }
 
-    results.push({
-      platform, content, hashtags, charLimit, scheduledAt,
-      generatedContentId: genRow.id,
-      scheduledPostId:    postRow.id,
-      connectionId,
-    })
+    // -------------------------------------------------------------------
+    // UPSERT scheduled_post:
+    //   - If an existing pending/failed row exists for this platform → UPDATE it
+    //   - Otherwise → INSERT a new row
+    // -------------------------------------------------------------------
+    const existingPostId = existingPostMap[platform]
+    const postMetadata = {
+      hashtags,
+      source_url:            sourceUrl,
+      og_image:              ogImage,
+      title:                 rewrittenTitle,
+      description:           rewrittenDescription,
+      content_pending:       false,
+      generated_at:          new Date().toISOString(),
+    }
+
+    if (existingPostId) {
+      // UPDATE the row that activateCampaign created
+      const { error: updateErr } = await supabase
+        .from('scheduled_posts')
+        .update({
+          content,
+          status:   'pending',
+          metadata: postMetadata,
+          ...(generatedContentId ? { generated_content_id: generatedContentId } : {}),
+          ...(connectionId ? { connection_id: connectionId } : {}),
+        })
+        .eq('id', existingPostId)
+
+      if (updateErr) {
+        results.push({ platform, content, hashtags, charLimit, scheduledAt,
+          generatedContentId, scheduledPostId: '', connectionId,
+          error: `Failed to update scheduled post: ${updateErr.message}` })
+        continue
+      }
+
+      results.push({
+        platform, content, hashtags, charLimit, scheduledAt,
+        generatedContentId,
+        scheduledPostId: existingPostId,
+        connectionId,
+      })
+    } else {
+      // INSERT a new row (no activation rows exist yet)
+      const insertPayload: Record<string, unknown> = {
+        user_id:      user.id,
+        campaign_id:  campaignId,
+        url_id:       urlId,
+        platform,
+        content,
+        scheduled_at: scheduledAt,
+        status:       'pending',
+        metadata:     postMetadata,
+      }
+      if (connectionId)      insertPayload.connection_id        = connectionId
+      if (generatedContentId) insertPayload.generated_content_id = generatedContentId
+
+      const { data: postRow, error: postErr } = await supabase
+        .from('scheduled_posts')
+        .insert(insertPayload)
+        .select('id')
+        .single()
+
+      if (postErr || !postRow) {
+        results.push({ platform, content, hashtags, charLimit, scheduledAt,
+          generatedContentId, scheduledPostId: '', connectionId,
+          error: postErr?.message ?? 'Failed to create scheduled post' })
+        continue
+      }
+
+      results.push({
+        platform, content, hashtags, charLimit, scheduledAt,
+        generatedContentId,
+        scheduledPostId: postRow.id,
+        connectionId,
+      })
+    }
   }
 
   return NextResponse.json({

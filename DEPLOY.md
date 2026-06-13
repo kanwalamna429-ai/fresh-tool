@@ -96,26 +96,36 @@ By default Supabase uses its own rate-limited SMTP relay (good enough for testin
 
 ### 2g. Run Database Migrations
 
-PostFlow requires four tables in Supabase. **You must run the migration before the app will save any data.**
+PostFlow uses incremental migrations. **Run them in order** from the Supabase SQL Editor.
 
-1. Go to **SQL Editor** in your Supabase project
-2. Click **New query**
-3. Copy the entire contents of `supabase/migrations/001_initial.sql` from this repo and paste it in
-4. Click **Run** (or press `Ctrl+Enter`)
-5. You should see `Success. No rows returned` — that means all four tables and RLS policies were created
+#### Step-by-step
 
-**Tables created by the migration:**
+1. Go to **SQL Editor** in your Supabase project → **New query**
+2. For each file below, paste its full contents and click **Run**:
 
-| Table | Purpose |
-|-------|---------|
-| `campaign_urls` | URL library entries (and campaign-specific URLs) |
-| `campaigns` | Campaign records with schedule config |
-| `platform_connections` | Connected accounts (credentials encrypted at rest) |
-| `system_logs` | Publish event history |
+| Order | File | What it creates |
+|-------|------|----------------|
+| 1 | `supabase/migrations/001_initial.sql` | Core tables: campaigns, campaign\_urls, platform\_connections, system\_logs |
+| 2 | `supabase/migrations/005_new_platforms.sql` | Expands platform CHECK constraints to 17 platforms |
+| 3 | `supabase/migrations/006_campaign_engine.sql` | frequency\_type/value columns; url\_id on scheduled\_posts |
+| 4 | `supabase/migrations/007_phase7_publishing.sql` | Locking/retry columns; published\_posts columns |
+| 5 | `supabase/migrations/008_fix_platform_constraints.sql` | Fixes any duplicate platform CHECK constraints |
+| 6 | `supabase/migrations/009_campaigns_store_columns.sql` | Denormalised counter columns on campaigns |
+| 7 | `supabase/migrations/010_ensure_scheduled_posts.sql` | Creates scheduled\_posts, extracted\_content, generated\_content if missing; ensures all columns exist |
 
-6. Verify RLS is enabled on each table: **Table Editor** → select table → **RLS** tab → should show **Enabled**
+> **Already ran some migrations?** Every file is idempotent — safe to run again. If you see `already exists` errors they are harmless.
 
-> If you see `already exists` errors, the migration has been run before — that is fine, you can ignore them or use `IF NOT EXISTS` (already included).
+#### Shortcut for new deployments
+
+If this is a **fresh** Supabase project, you can run just two files in order:
+
+1. `supabase/migrations/001_schema.sql` — full schema (all tables, all columns)
+2. `supabase/migrations/002_rls.sql` — Row Level Security policies
+3. `supabase/migrations/010_ensure_scheduled_posts.sql` — catches any gaps
+
+Then run `005`, `006`, `007`, `008`, `009` for completeness (they are all idempotent).
+
+3. Verify RLS is enabled: **Table Editor** → select any table → **RLS** tab → should show **Enabled**
 
 ---
 

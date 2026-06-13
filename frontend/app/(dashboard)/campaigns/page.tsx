@@ -141,6 +141,7 @@ export default function CampaignsPage() {
   const [formError, setFormError] = useState<string | null>(null)
   const [notice, setNotice]       = useState<ActivationNotice | null>(null)
   const [bulkCampaignOpen, setBulkCampaignOpen] = useState(false)
+  const [generatingFor, setGeneratingFor]       = useState<string | null>(null)
 
   const [search, setSearch]             = useState("")
   const [statusFilter, setStatusFilter] = useState("all")
@@ -207,6 +208,22 @@ export default function CampaignsPage() {
     setForm((f) => ({ ...f, campaignUrls: [] }))
   }, [])
 
+  // ---- Auto-generate posts after activation (fire-and-forget with UI feedback) ----
+  async function triggerAutoGenerate(campaignId: string, campaignName: string) {
+    setGeneratingFor(campaignId)
+    try {
+      await fetch("/api/campaign/auto-generate", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ campaignId }),
+      })
+    } catch {
+      // Non-blocking; user can manually generate on Content page
+    } finally {
+      setGeneratingFor(null)
+    }
+  }
+
   // ---- Submit new campaign ----
   async function handleCreateCampaign(activateAfter = false) {
     if (!form.name.trim()) { setFormError("Campaign name is required."); return }
@@ -243,6 +260,8 @@ export default function CampaignsPage() {
         lastDate:     preview.lastPublishAt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
       })
       setTimeout(() => setNotice(null), 6000)
+      // Auto-generate AI posts for all URLs in the background
+      triggerAutoGenerate(campaign.id, campaign.name)
     }
 
     setForm(EMPTY_FORM)
@@ -277,6 +296,8 @@ export default function CampaignsPage() {
         lastDate:     preview.lastPublishAt.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }),
       })
       setTimeout(() => setNotice(null), 6000)
+      // Auto-generate AI posts for all URLs in the background
+      triggerAutoGenerate(campaignId, campaign.name)
 
     } else if (action === "pause") {
       await updateCampaignStatus(campaignId, "paused", { scheduledPosts: 0 })
@@ -729,6 +750,7 @@ export default function CampaignsPage() {
                 key={campaign.id}
                 campaign={campaign}
                 onAction={handleAction}
+                isGenerating={generatingFor === campaign.id}
               />
             ))
           )}
@@ -763,9 +785,11 @@ export default function CampaignsPage() {
 function CampaignCard({
   campaign,
   onAction,
+  isGenerating = false,
 }: {
-  campaign: Campaign
-  onAction: (id: string, action: string) => void
+  campaign:    Campaign
+  onAction:    (id: string, action: string) => void
+  isGenerating?: boolean
 }) {
   const actions = STATUS_ACTIONS[campaign.status] ?? []
 
@@ -781,6 +805,12 @@ function CampaignCard({
               <Badge variant={STATUS_VARIANTS[campaign.status]} className="capitalize text-[11px]">
                 {campaign.status}
               </Badge>
+              {isGenerating && (
+                <span className="inline-flex items-center gap-1 text-[11px] text-muted-foreground animate-pulse">
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-bounce" />
+                  Generating posts…
+                </span>
+              )}
             </div>
 
             {/* Description */}

@@ -435,8 +435,10 @@ function UrlCard({ url, campaign, connections }: UrlCardProps) {
           }),
         })
         const regenData: GenerateResponse = await regenRes.json()
-        if (regenData.success && regenData.posts?.[0]?.scheduledPostId) {
-          scheduledPostId = regenData.posts[0].scheduledPostId
+        // Match by platform — posts[0] may be a different platform
+        const regenPost = regenData.posts?.find((p: GeneratedPost) => p.platform === platform)
+        if (regenData.success && regenPost?.scheduledPostId) {
+          scheduledPostId = regenPost.scheduledPostId
         }
       }
 
