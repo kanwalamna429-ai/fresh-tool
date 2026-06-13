@@ -706,15 +706,19 @@ export default function ContentPage() {
   useEffect(() => {
     const supabase = getSupabase()
     if (!supabase) { setConnectionsLoaded(true); return }
-    supabase
-      .from("platform_connections")
-      .select("id, platform, status")
-      .is("deleted_at", null)
-      .then(({ data, error }) => {
+    ;(async () => {
+      try {
+        const { data, error } = await supabase
+          .from("platform_connections")
+          .select("id, platform, status")
+          .is("deleted_at", null)
         if (!error) setConnections(data ?? [])
+      } catch {
+        // ignore fetch errors
+      } finally {
         setConnectionsLoaded(true)
-      })
-      .catch(() => { setConnectionsLoaded(true) })
+      }
+    })()
   }, [])
 
   // Load URLs for selected campaign using campaign.url_ids
