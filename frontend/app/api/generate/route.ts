@@ -22,7 +22,7 @@ import { createClient } from '@/lib/supabase/server'
 import { generateSocialPost } from '@/lib/services/ai/social-post'
 import { generateDescription } from '@/lib/services/ai/description'
 import { generate } from '@/lib/services/ai/client'
-import { buildTitlePrompt, PLATFORM_LIMITS } from '@/lib/services/ai/prompts'
+import { PLATFORM_LIMITS } from '@/lib/services/ai/prompts'
 import { frequencyToMs } from '@/lib/services/campaigns/frequency'
 import { loadSettings } from '@/lib/services/settings'
 import type {
@@ -44,6 +44,7 @@ const DEFAULT_PLATFORM_SETTING: PlatformDefaultSettings = {
   cta:          '',
   includeEmoji: true,
   autoApprove:  false,
+  maxHashtags:  0,
 }
 
 interface GenerateBody {
@@ -59,11 +60,25 @@ interface GenerateBody {
 async function rewriteTitle(ctx: ContentContext): Promise<string | null> {
   if (!ctx.title && !ctx.sourceText) return null
   try {
-    const prompt = buildTitlePrompt(ctx, { purpose: 'social', variants: 1, maxLength: 100 })
-    const res    = await generate(prompt, { temperature: 0.8, maxOutputTokens: 128 })
-    const parsed = JSON.parse(res.text.trim())
-    if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === 'string') return parsed[0]
-    return res.text.trim().replace(/^["']|["']$/g, '')
+    const snippet = (ctx.sourceText ?? ctx.title ?? '').slice(0, 600)
+    const titleLine = ctx.title ? `Original title: "${ctx.title}"\n` : ''
+    const prompt = [
+      'You are a professional content marketer.',
+      'Write a compelling, punchy, social-media-ready title for the content below.',
+      '',
+      titleLine + `Content: ${snippet}`,
+      '',
+      'Rules: output ONLY the title text — no quotes, no JSON, no markdown, no explanation. Max 100 characters.',
+    ].join('\n')
+
+    const res     = await generate(prompt, { temperature: 0.8, maxOutputTokens: 100 })
+    const cleaned = res.text
+      .trim()
+      .replace(/^```[\w]*\s*/m, '').replace(/\s*```$/m, '') // strip code fences
+      .replace(/^["'`]|["'`]$/g, '')                         // strip surrounding quotes
+      .split('\n')[0]                                         // first line only
+      .trim()
+    return cleaned.length >= 5 ? cleaned : null
   } catch { return null }
 }
 
@@ -302,11 +317,29 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     if (!content) content = enrichedCtx.title ?? sourceUrl ?? `[Content for ${platform}]`
 
+    // Append source URL to the post body for social/short-form platforms.
+    // Publishing platforms (devto, hashnode) already append it in their own adapter body builders.
+    const PUBLISHING_PLATFORMS = new Set(['devto', 'hashnode', 'medium', 'substack'])
+    if (sourceUrl && content && !PUBLISHING_PLATFORMS.has(platform) && !content.includes(sourceUrl)) {
+      const suffix = `\n${sourceUrl}`
+      if (content.length + suffix.length <= charLimit) {
+        content += suffix
+      }
+    }
+
     if (pSettings.hashtags) {
       const custom = pSettings.hashtags
         .split(/[\s,]+/).map((t) => t.trim()).filter(Boolean)
         .map((t) => (t.startsWith('#') ? t : `#${t}`))
       hashtags = [...new Set([...hashtags, ...custom])]
+    }
+
+    // Respect per-platform maxHashtags setting (0 = use platform default)
+    const maxHashtags = pSettings.maxHashtags > 0
+      ? pSettings.maxHashtags
+      : (limits?.hashtagCount ?? 5)
+    if (hashtags.length > maxHashtags) {
+      hashtags = hashtags.slice(0, maxHashtags)
     }
 
     // -------------------------------------------------------------------
@@ -357,6 +390,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
       og_image:              ogImage,
       title:                 rewrittenTitle,
       description:           rewrittenDescription,
+      char_limit:            charLimit,
       content_pending:       false,
       generated_at:          new Date().toISOString(),
     }

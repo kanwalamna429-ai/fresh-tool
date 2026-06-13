@@ -355,6 +355,66 @@ function UrlCard({ url, campaign, connections }: UrlCardProps) {
       .then(({ data }) => { if (data) setExtracted(data) })
   }, [url.id])
 
+  // Restore previously generated posts from Supabase so state survives navigation
+  useEffect(() => {
+    let active = true
+    const supabase = getSupabase()
+    if (!supabase) return
+    ;(async () => {
+      try {
+        const { data: posts } = await supabase
+          .from("scheduled_posts")
+          .select("id, platform, content, metadata, connection_id, scheduled_at")
+          .eq("campaign_id", campaign.id)
+          .eq("url_id", url.id)
+          .in("status", ["pending", "failed"])
+          .is("deleted_at", null)
+          .order("created_at", { ascending: true })
+
+        if (!active) return
+        if (!posts || posts.length === 0) return
+
+        // Skip placeholder rows that have no real AI content yet
+        const readyPosts = posts.filter(
+          (p) => p.content && !(p.metadata as Record<string, unknown>)?.content_pending
+        )
+        if (readyPosts.length === 0) return
+
+        const reconstructed: GeneratedPost[] = readyPosts.map((p) => {
+          const meta = (p.metadata ?? {}) as Record<string, unknown>
+          return {
+            platform:           p.platform,
+            content:            p.content ?? "",
+            hashtags:           Array.isArray(meta.hashtags) ? (meta.hashtags as string[]) : [],
+            charLimit:          typeof meta.char_limit === "number" ? meta.char_limit : 500,
+            scheduledAt:        p.scheduled_at ?? "",
+            generatedContentId: "",
+            scheduledPostId:    p.id,
+            connectionId:       p.connection_id ?? null,
+          }
+        })
+
+        setGeneratedPosts(reconstructed)
+        setGenerateState("done")
+
+        // Restore shared display metadata from the first post
+        const firstMeta = (readyPosts[0].metadata ?? {}) as Record<string, unknown>
+        if (typeof firstMeta.title       === "string") setRewrittenTitle(firstMeta.title)
+        if (typeof firstMeta.description === "string") setRewrittenDesc(firstMeta.description)
+        if (typeof firstMeta.og_image    === "string") setGeneratedOgImage(firstMeta.og_image)
+        if (typeof firstMeta.source_url  === "string") setGeneratedSourceUrl(firstMeta.source_url)
+
+        // Pre-populate editable content
+        const init: Record<string, string> = {}
+        for (const p of reconstructed) init[p.platform] = p.content
+        setEditedContent(init)
+      } catch {
+        // Persistence is best-effort — ignore errors silently
+      }
+    })()
+    return () => { active = false }
+  }, [url.id, campaign.id])
+
   // ---- Extract ----
   async function handleExtract() {
     setExtractState("extracting")

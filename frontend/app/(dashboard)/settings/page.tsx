@@ -152,7 +152,7 @@ export default function SettingsPage() {
     }
   }
 
-  function updatePlatformSetting(platformId: string, key: keyof PlatformDefaultSettings, value: string | boolean) {
+  function updatePlatformSetting(platformId: string, key: keyof PlatformDefaultSettings, value: string | boolean | number) {
     setPlatformSettings((prev) => ({
       ...prev,
       [platformId]: { ...prev[platformId], [key]: value },
@@ -396,6 +396,26 @@ export default function SettingsPage() {
                               />
                               <p className="text-[11px] text-muted-foreground">
                                 Added to every generated post for this platform. Prefix with # for hashtag platforms.
+                              </p>
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <Label className="text-xs">Max Hashtags</Label>
+                              <Input
+                                type="number"
+                                min={0}
+                                max={30}
+                                placeholder={limits ? String(limits.hashtagCount) : "5"}
+                                value={settings.maxHashtags === 0 ? "" : settings.maxHashtags}
+                                onChange={(e) => {
+                                  const n = parseInt(e.target.value, 10)
+                                  updatePlatformSetting(platform.id, "maxHashtags", isNaN(n) ? 0 : n)
+                                }}
+                                className="text-sm"
+                              />
+                              <p className="text-[11px] text-muted-foreground">
+                                Maximum hashtags to include. Leave blank to use the platform default
+                                {limits ? ` (${limits.hashtagCount})` : ""}.
                               </p>
                             </div>
 

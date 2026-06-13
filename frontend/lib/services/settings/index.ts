@@ -26,6 +26,7 @@ export interface PlatformDefaultSettings {
   cta:           string   // call-to-action text
   includeEmoji:  boolean
   autoApprove:   boolean
+  maxHashtags:   number   // max hashtag count to generate (0 = use platform default)
 }
 
 export type PlatformDefaults = Record<string, PlatformDefaultSettings>
@@ -44,6 +45,7 @@ export const DEFAULT_PLATFORM_SETTING: PlatformDefaultSettings = {
   cta:          '',
   includeEmoji: true,
   autoApprove:  false,
+  maxHashtags:  0,
 }
 
 // ---------------------------------------------------------------------------
