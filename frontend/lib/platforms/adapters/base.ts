@@ -147,11 +147,20 @@ export abstract class BaseAdapter implements PlatformAdapter {
   }
 
   protected networkError(err: unknown): AdapterError {
-    if (err instanceof Error && (err as AdapterError & Error).code !== undefined) {
-      return err as unknown as AdapterError
+    // Already a plain AdapterError object (thrown by requireCredential / adapterError())
+    if (
+      err !== null &&
+      typeof err === 'object' &&
+      'code' in err &&
+      'message' in err &&
+      typeof (err as Record<string, unknown>).message === 'string'
+    ) {
+      return err as AdapterError
     }
-    const message = err instanceof Error ? err.message : 'Unknown network error'
-    return this.adapterError('NETWORK_ERROR', message, true)
+    if (err instanceof Error) {
+      return this.adapterError('NETWORK_ERROR', err.message, true)
+    }
+    return this.adapterError('NETWORK_ERROR', 'Unknown network error', true)
   }
 
   protected extractErrorMessage(body?: unknown): string {

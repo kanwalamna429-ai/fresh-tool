@@ -134,12 +134,13 @@ interface ActivationNotice {
 
 export default function CampaignsPage() {
   const { urls: libraryUrls } = useUrlStore()
-  const { campaigns, createCampaign, updateCampaignStatus, deleteCampaign, dbError: campaignDbError } = useCampaigns()
+  const { campaigns, createCampaign, updateCampaign, updateCampaignStatus, deleteCampaign, dbError: campaignDbError } = useCampaigns()
 
-  const [showForm, setShowForm]   = useState(false)
-  const [form, setForm]           = useState<FormState>(EMPTY_FORM)
-  const [formError, setFormError] = useState<string | null>(null)
-  const [notice, setNotice]       = useState<ActivationNotice | null>(null)
+  const [showForm, setShowForm]       = useState(false)
+  const [editingCampaignId, setEditingCampaignId] = useState<string | null>(null)
+  const [form, setForm]               = useState<FormState>(EMPTY_FORM)
+  const [formError, setFormError]     = useState<string | null>(null)
+  const [notice, setNotice]           = useState<ActivationNotice | null>(null)
   const [bulkCampaignOpen, setBulkCampaignOpen] = useState(false)
   const [generatingFor, setGeneratingFor]       = useState<string | null>(null)
 
@@ -224,7 +225,7 @@ export default function CampaignsPage() {
     }
   }
 
-  // ---- Submit new campaign ----
+  // ---- Submit campaign (create or edit) ----
   async function handleCreateCampaign(activateAfter = false) {
     if (!form.name.trim()) { setFormError("Campaign name is required."); return }
     if (form.platforms.length === 0) { setFormError("Select at least one platform."); return }
@@ -233,6 +234,24 @@ export default function CampaignsPage() {
 
     const freq = parseFrequencyKey(form.frequencyKey)
 
+    if (editingCampaignId) {
+      // ---- Edit existing campaign ----
+      await updateCampaign(editingCampaignId, {
+        name:        form.name.trim(),
+        description: form.description.trim() || undefined,
+        platforms:   form.platforms,
+        frequency:   frequencyLabel(freq),
+        startDate:   form.startDate,
+        endDate:     form.startDate,
+        timezone:    form.timezone,
+      })
+      setForm(EMPTY_FORM)
+      setEditingCampaignId(null)
+      setShowForm(false)
+      return
+    }
+
+    // ---- Create new campaign ----
     const campaign = await createCampaign({
       name:           form.name.trim(),
       description:    form.description.trim() || undefined,
@@ -309,6 +328,41 @@ export default function CampaignsPage() {
       await updateCampaignStatus(campaignId, "draft")
     } else if (action === "delete") {
       await deleteCampaign(campaignId)
+    } else if (action === "edit") {
+      const freqMatch = campaign.frequency
+        ? FREQUENCY_PRESETS.find((p) => frequencyLabel({ type: p.type, value: p.value }) === campaign.frequency)
+        : null
+      setEditingCampaignId(campaignId)
+      setForm({
+        name:         campaign.name,
+        description:  campaign.description ?? "",
+        platforms:    campaign.platforms as string[],
+        urlIds:       [],
+        campaignUrls: [],
+        frequencyKey: freqMatch
+          ? frequencyKey({ type: freqMatch.type, value: freqMatch.value })
+          : DEFAULT_FREQUENCY_KEY,
+        startDate:    campaign.startDate || new Date().toISOString().split("T")[0],
+        timezone:     campaign.timezone || "UTC",
+      })
+      setFormError(null)
+      setShowForm(true)
+    } else if (action === "duplicate") {
+      await createCampaign({
+        name:           `${campaign.name} (copy)`,
+        description:    campaign.description,
+        status:         "draft",
+        platforms:      campaign.platforms,
+        scheduledPosts: 0,
+        publishedPosts: 0,
+        failedPosts:    0,
+        startDate:      campaign.startDate,
+        endDate:        campaign.endDate,
+        successRate:    0,
+        frequency:      campaign.frequency,
+        timezone:       campaign.timezone,
+        urlCount:       campaign.urlCount,
+      })
     }
   }
 
@@ -376,7 +430,17 @@ export default function CampaignsPage() {
           <Button
             size="sm"
             className="gap-1.5"
-            onClick={() => { setShowForm((v) => !v); setFormError(null) }}
+            onClick={() => {
+              if (showForm) {
+                setShowForm(false)
+                setEditingCampaignId(null)
+                setForm(EMPTY_FORM)
+                setFormError(null)
+              } else {
+                setShowForm(true)
+                setFormError(null)
+              }
+            }}
           >
             {showForm ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
             {showForm ? "Cancel" : "New Campaign"}
@@ -389,7 +453,7 @@ export default function CampaignsPage() {
             <CardHeader className="pb-4">
               <CardTitle className="text-base flex items-center gap-2">
                 <Plus className="h-4 w-4" />
-                Create Campaign
+                {editingCampaignId ? "Edit Campaign" : "Create Campaign"}
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-5">
@@ -691,22 +755,30 @@ export default function CampaignsPage() {
 
               {/* Actions */}
               <div className="flex items-center justify-end gap-2 pt-1">
-                <Button variant="ghost" size="sm" onClick={() => { setShowForm(false); setForm(EMPTY_FORM); setFormError(null) }}>
+                <Button variant="ghost" size="sm" onClick={() => { setShowForm(false); setEditingCampaignId(null); setForm(EMPTY_FORM); setFormError(null) }}>
                   Cancel
                 </Button>
-                <Button size="sm" onClick={() => handleCreateCampaign(false)}>
-                  Create as Draft
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="gap-1.5"
-                  onClick={() => handleCreateCampaign(true)}
-                  disabled={!schedulePreview}
-                >
-                  <Zap className="h-3.5 w-3.5" />
-                  Create &amp; Activate
-                </Button>
+                {editingCampaignId ? (
+                  <Button size="sm" onClick={() => handleCreateCampaign(false)}>
+                    Save Changes
+                  </Button>
+                ) : (
+                  <>
+                    <Button size="sm" onClick={() => handleCreateCampaign(false)}>
+                      Create as Draft
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="gap-1.5"
+                      onClick={() => handleCreateCampaign(true)}
+                      disabled={!schedulePreview}
+                    >
+                      <Zap className="h-3.5 w-3.5" />
+                      Create &amp; Activate
+                    </Button>
+                  </>
+                )}
               </div>
             </CardContent>
           </Card>
@@ -913,8 +985,8 @@ function CampaignCard({
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem>View details</DropdownMenuItem>
-                <DropdownMenuItem>Edit</DropdownMenuItem>
-                <DropdownMenuItem>Duplicate</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onAction(campaign.id, "edit")}>Edit</DropdownMenuItem>
+                <DropdownMenuItem onClick={() => onAction(campaign.id, "duplicate")}>Duplicate</DropdownMenuItem>
                 {actions.length > 0 && <DropdownMenuSeparator />}
                 {actions.map((a) => (
                   <DropdownMenuItem

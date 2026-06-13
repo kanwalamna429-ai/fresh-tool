@@ -81,5 +81,7 @@ export interface ConnectionRow {
   status: string
   accessTokenEnc?: string | null
   refreshTokenEnc?: string | null
+  /** Encrypted JSON blob: base64(iv[12] + authTag[16] + ciphertext) — written by /api/connections */
+  credentialsEncrypted?: string | null
   metadata: Record<string, string>
 }

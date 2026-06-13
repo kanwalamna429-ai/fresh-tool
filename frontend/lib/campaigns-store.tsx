@@ -19,11 +19,24 @@ interface CreateCampaignInput extends Omit<Campaign, "id"> {
   urlIds?: string[]
 }
 
+interface UpdateCampaignInput {
+  name?: string
+  description?: string
+  platforms?: string[]
+  frequency?: string
+  startDate?: string
+  endDate?: string
+  timezone?: string
+  urlCount?: number
+  urlIds?: string[]
+}
+
 interface CampaignsStore {
   campaigns: Campaign[]
   loading: boolean
   dbError: string | null
   createCampaign: (input: CreateCampaignInput) => Promise<Campaign>
+  updateCampaign: (id: string, input: UpdateCampaignInput) => Promise<void>
   updateCampaignStatus: (id: string, status: CampaignStatus, extra?: Partial<Campaign>) => Promise<void>
   deleteCampaign: (id: string) => Promise<void>
 }
@@ -163,6 +176,45 @@ export function CampaignsProvider({ children }: { children: ReactNode }) {
     return optimistic
   }, [])
 
+  const updateCampaign = useCallback(async (id: string, input: UpdateCampaignInput) => {
+    setCampaigns((prev) =>
+      prev.map((c) =>
+        c.id === id
+          ? {
+              ...c,
+              name:        input.name        ?? c.name,
+              description: input.description ?? c.description,
+              platforms:   (input.platforms  ?? c.platforms) as Campaign["platforms"],
+              frequency:   input.frequency   ?? c.frequency,
+              startDate:   input.startDate   ?? c.startDate,
+              endDate:     input.endDate     ?? c.endDate,
+              timezone:    input.timezone    ?? c.timezone,
+              urlCount:    input.urlCount    ?? c.urlCount,
+            }
+          : c
+      )
+    )
+    const supabase = getSupabase()
+    if (supabase) {
+      try {
+        const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
+        if (input.name        !== undefined) patch.name        = input.name
+        if (input.description !== undefined) patch.description = input.description || null
+        if (input.platforms   !== undefined) patch.platforms   = input.platforms
+        if (input.frequency   !== undefined) patch.frequency   = input.frequency || null
+        if (input.startDate   !== undefined) patch.start_date  = input.startDate  || null
+        if (input.endDate     !== undefined) patch.end_date    = input.endDate    || null
+        if (input.timezone    !== undefined) patch.timezone    = input.timezone   || "UTC"
+        if (input.urlCount    !== undefined) patch.url_count   = input.urlCount
+        if (input.urlIds      !== undefined) patch.url_ids     = input.urlIds
+        const { error } = await supabase.from("campaigns").update(patch).eq("id", id)
+        if (error) console.error("[campaigns-store] updateCampaign error:", error)
+      } catch (err) {
+        console.error("[campaigns-store] updateCampaign failed:", err)
+      }
+    }
+  }, [])
+
   const updateCampaignStatus = useCallback(async (
     id: string,
     status: CampaignStatus,
@@ -204,7 +256,7 @@ export function CampaignsProvider({ children }: { children: ReactNode }) {
 
   return (
     <CampaignsContext.Provider
-      value={{ campaigns, loading, dbError, createCampaign, updateCampaignStatus, deleteCampaign }}
+      value={{ campaigns, loading, dbError, createCampaign, updateCampaign, updateCampaignStatus, deleteCampaign }}
     >
       {children}
     </CampaignsContext.Provider>

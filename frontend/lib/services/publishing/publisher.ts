@@ -15,6 +15,7 @@
 // =============================================================================
 
 import type { SupabaseClient } from '@supabase/supabase-js'
+import { createDecipheriv } from 'node:crypto'
 import { getAdapter } from '@/lib/platforms/adapters'
 import { decryptConnectionCredentials } from '@/lib/platforms/adapters/crypto'
 import type { PublishInput } from '@/lib/platforms/adapters'
@@ -28,6 +29,32 @@ import {
   logStaleLockReleased,
 } from './log-writer'
 import type { PublishJobInput, PublishJobResult, ConnectionRow } from './types'
+
+// ---------------------------------------------------------------------------
+// Decrypt the credentials_encrypted blob written by /api/connections
+// Format: base64( iv[12] + authTag[16] + ciphertext )
+// Falls back to plain base64-decoded JSON if no encryption key is set.
+// ---------------------------------------------------------------------------
+
+async function decryptCredentialsBlob(blob: string): Promise<Record<string, string>> {
+  const raw = process.env.POSTFLOW_ENCRYPTION_KEY
+  if (!raw) {
+    const json = Buffer.from(blob, 'base64').toString('utf8')
+    return JSON.parse(json) as Record<string, string>
+  }
+  const key = Buffer.from(raw, 'hex')
+  if (key.length !== 32) throw new Error('POSTFLOW_ENCRYPTION_KEY must be 64 hex chars')
+
+  const buf       = Buffer.from(blob, 'base64')
+  const iv        = buf.subarray(0, 12)
+  const authTag   = buf.subarray(12, 28)
+  const encrypted = buf.subarray(28)
+
+  const decipher = createDecipheriv('aes-256-gcm', key, iv)
+  decipher.setAuthTag(authTag)
+  const plain = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString('utf8')
+  return JSON.parse(plain) as Record<string, string>
+}
 
 // ---------------------------------------------------------------------------
 // Internal: load a scheduled_post row
@@ -90,7 +117,7 @@ async function loadConnection(
 ): Promise<ConnectionRow | null> {
   const { data, error } = await supabase
     .from('platform_connections')
-    .select('id, user_id, platform, account_name, account_handle, instance_url, status, access_token_enc, refresh_token_enc, metadata')
+    .select('id, user_id, platform, account_name, account_handle, instance_url, status, access_token_enc, refresh_token_enc, credentials_encrypted, metadata')
     .eq('user_id', userId)
     .eq('platform', platform)
     .eq('status', 'connected')
@@ -100,16 +127,17 @@ async function loadConnection(
   if (error || !data) return null
 
   return {
-    id:              data.id,
-    userId:          data.user_id,
-    platform:        data.platform,
-    accountName:     data.account_name ?? '',
-    accountHandle:   data.account_handle ?? '',
-    instanceUrl:     data.instance_url ?? undefined,
-    status:          data.status,
-    accessTokenEnc:  data.access_token_enc  ?? null,
-    refreshTokenEnc: data.refresh_token_enc ?? null,
-    metadata:        (data.metadata as Record<string, string>) ?? {},
+    id:                   data.id,
+    userId:               data.user_id,
+    platform:             data.platform,
+    accountName:          data.account_name ?? '',
+    accountHandle:        data.account_handle ?? '',
+    instanceUrl:          data.instance_url ?? undefined,
+    status:               data.status,
+    accessTokenEnc:       data.access_token_enc  ?? null,
+    refreshTokenEnc:      data.refresh_token_enc ?? null,
+    credentialsEncrypted: (data as Record<string, unknown>).credentials_encrypted as string ?? null,
+    metadata:             (data.metadata as Record<string, string>) ?? {},
   }
 }
 
@@ -319,14 +347,32 @@ export async function publishOne(
 
   // -------------------------------------------------------------------------
   // 6. Decrypt credentials
+  //
+  // Priority order:
+  //   a) credentials_encrypted — JSON blob saved by /api/connections (new path)
+  //   b) access_token_enc / refresh_token_enc — legacy columns (fallback)
+  //   c) metadata fields — plaintext extras (always merged in)
   // -------------------------------------------------------------------------
   let credentials: Record<string, string>
   try {
-    credentials = await decryptConnectionCredentials({
-      accessTokenEnc:  connection.accessTokenEnc ?? undefined,
-      refreshTokenEnc: connection.refreshTokenEnc ?? undefined,
-      metadata:        connection.metadata,
-    })
+    if (connection.credentialsEncrypted) {
+      // Primary path: full credential map encrypted as a single JSON blob
+      const blob = await decryptCredentialsBlob(connection.credentialsEncrypted)
+      // Merge plaintext metadata on top (instance_url, etc.)
+      credentials = {
+        ...blob,
+        ...Object.fromEntries(
+          Object.entries(connection.metadata).filter(([, v]) => typeof v === 'string')
+        ),
+      }
+    } else {
+      // Legacy path: access_token_enc / refresh_token_enc columns
+      credentials = await decryptConnectionCredentials({
+        accessTokenEnc:  connection.accessTokenEnc ?? undefined,
+        refreshTokenEnc: connection.refreshTokenEnc ?? undefined,
+        metadata:        connection.metadata,
+      })
+    }
 
     // Inject instance URL for federated platforms (Mastodon, Misskey, Pixelfed)
     if (connection.instanceUrl) {
